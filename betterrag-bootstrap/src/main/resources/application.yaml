@@ -1,0 +1,65 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: betterrag
+
+  servlet:
+    multipart:
+      max-file-size: 20MB
+      max-request-size: 20MB
+
+  ai:
+    openai:
+      base-url: ${SILICONFLOW_BASE_URL:https://api.siliconflow.cn}
+      api-key: ${SILICONFLOW_API_KEY:your-api-key}
+      chat:
+        options:
+          model: deepseek-ai/DeepSeek-V3.2
+          temperature: 0.1
+      embedding:
+        options:
+          model: Qwen/Qwen3-Embedding-8B
+          dimensions: 1536
+
+    vectorstore:
+      pgvector:
+        initialize-schema: true
+        dimensions: ${EMBEDDING_DIMENSION:1536}
+        index-type: hnsw
+        distance-type: cosine_distance
+        schema-validation: false
+
+    mcp:
+      client:
+        type: SYNC
+        streamable-http:
+          connections:
+            betterrag-server:
+              url: http://127.0.0.1:8081
+              endpoint: /mcp
+
+  datasource:
+    url: ${PGVECTOR_URL:jdbc:postgresql://localhost:5432/betterrag}
+    username: ${PGVECTOR_USERNAME:postgres}
+    password: ${PGVECTOR_PASSWORD:postgres}
+
+app:
+  rag:
+    rewrite-model: ${RAG_REWRITE_MODEL:}
+    answer-model: ${RAG_ANSWER_MODEL:}
+    rerank-model: Qwen/Qwen3-Reranker-8B
+    rerank-endpoint: https://api.siliconflow.cn/v1/rerank
+    retrieve-top-k: 8
+    rerank-top-n: 4
+    rerank-max-document-chars: 12000
+    chunk-size: 800
+    min-chunk-size-chars: 350
+    min-chunk-length-to-embed: 10
+    max-num-chunks: 1000
+    memory-max-messages: 20
+    keyword-top-k: 8
+    rrf-k: 60
+    es-analyzer: ${ES_ANALYZER:ik_smart}
+    es-url: ${ELASTICSEARCH_URL:http://localhost:9200}

@@ -1,0 +1,14 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: betterrag-mcp-server
+  ai:
+    mcp:
+      server:
+        name: betterrag-mcp-server
+        version: 1.0.0
+        protocol: STREAMABLE
+        streamable-http:
+          mcp-endpoint: /mcp

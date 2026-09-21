@@ -30,3 +30,7 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Qoder / Claude local ###
+.qoder/
+.claude/
