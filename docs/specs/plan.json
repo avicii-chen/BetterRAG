@@ -1,0 +1,262 @@
+{
+  "feature": "BetterRAG 五方向优化:自进化闭环(DAG+Trace / 评测+快照 / Chunking+过滤 / Agent 层 / MCP+生产化)",
+  "source": "docs/specs/00-tech-decisions.md 与 docs/specs/01~05-spec;源头为 jupiter-ws.cn Agent 自进化文章与目标 JD 的差距分析",
+  "codebase": "D:\\秋招\\其他\\tinyrag",
+  "conventions": "TDD:每 story 先写 red 测试再实现;测试分三层 @Tag: unit(纯逻辑)/integration(本地 PG/ES 直连,专用 betterrag_eval 域;Docker 就绪后切 Testcontainers,D4)/llm(真实调 SiliconFlow,仅手动)。所有行为变更受配置开关控制,默认值由 S5/S6 评测对比决定。",
+  "stories": [
+    {
+      "id": "S1",
+      "title": "Trace 基础设施:建表与组件埋点",
+      "covers": ["spec01 §4.1-4.2"],
+      "tasks": [
+        "新增 schema-trace.sql(rag_trace + rag_config_snapshot),接入 spring.sql.init",
+        "实现 TraceRecorder:start/span/finish,异步写库,失败仅 log.warn 不上抛",
+        "在 RewriteQueryTransformer / HybridDocumentRetriever / RerankDocumentPostProcessor / RAGService 埋点(advisor 模式)",
+        "app.rag.trace.enabled 开关与 no-op 空实现"
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "advisor 模式跑一次问答,rag_trace 出现含 4 段 span 的完整记录;关开关后零 SQL",
+      "scopeNotes": "纯增量,不碰检索行为。铁律:观测代码故障不得影响问答(专项测试)。",
+      "blockedBy": [],
+      "techGuidance": "D2/D3:nodes 存 JSONB 摘要(限长),输入输出只存 digest;snapshot 独立表 hash 去重"
+    },
+    {
+      "id": "S2",
+      "title": "DAG 执行器(纯逻辑)",
+      "covers": ["spec01 §4.3"],
+      "tasks": [
+        "RagNode/NodeContext/NodeTrace/DagPipeline 接口与顺序执行实现",
+        "ParallelNode:多节点并发包装与 join 合并",
+        "异常策略:FAIL_FAST(默认)与 SKIP_AND_CONTINUE(降级节点)",
+        "fake node 全覆盖单测(顺序/并行/单路降级/失败传播/耗时记录)"
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "纯逻辑单测绿:四类 DAG 剧本全部通过,无任何外部依赖",
+      "scopeNotes": "不碰业务代码,独立可测;线性+一层并行即止,不做通用图引擎。",
+      "blockedBy": [],
+      "techGuidance": "D1:NodeContext 用 ConcurrentHashMap 黑板模式;SKIP_AND_CONTINUE 语义对齐现有 Hybrid 降级"
+    },
+    {
+      "id": "S3",
+      "title": "编排切换:pipeline 模式上线(双模开关)",
+      "covers": ["spec01 §4.4"],
+      "tasks": [
+        "app.rag.orchestration: advisor|pipeline 配置与 pipeline Bean 装配",
+        "适配节点:RewriteNode / HybridRetrieveNode(内部并行+Fuse) / RerankNode / GenerateNode,复用现有组件",
+        "ContextInjectAdvisor:置于 memory advisor 之后注入检索上下文,保证记忆存原始问题",
+        "RAGService sources 改取编排结果;DAG NodeTrace 接 TraceRecorder 落库;SSE 等价性测试"
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "同一问题两模式 SSE 事件序列一致;memory 中用户消息为原始问题(不含增强文本)",
+      "scopeNotes": "本方向唯一行为变更点,advisor 模式保留为回退路径。",
+      "blockedBy": ["S1", "S2"],
+      "techGuidance": "D1 关键设计:增强必须发生在 memory 之后,否则检索文本污染会话历史——此点必须有断言测试"
+    },
+    {
+      "id": "S4",
+      "title": "评测框架骨架:数据集文件化+配置快照+run 持久化",
+      "covers": ["spec02 §4.1/4.3/4.6"],
+      "tasks": [
+        "dataset.yaml 定义与 Loader(字段校验,报错带 case id)",
+        "ConfigSnapshotService:SHA-256(全部 prompts + RAGProperties + 编排模式),落 rag_config_snapshot",
+        "eval_run 表(kind/snapshot_hash/metrics/cases JSONB)与 repository",
+        "EvalRunCompare:两次 run 指标差值对比输出"
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "同配置 hash 稳定、改 prompt 或参数 hash 变;数据集增删只改 yaml 不动 Java",
+      "scopeNotes": "全部纯逻辑+文件 IO,无容器依赖。",
+      "blockedBy": ["S1"],
+      "techGuidance": "评测 run 创建强制携带 snapshot_hash,无快照拒绝执行——保证指标永远可归因"
+    },
+    {
+      "id": "S5",
+      "title": "检索评测器:真实链路 hit@k/MRR/Recall@k 与基线",
+      "covers": ["spec02 §4.2/4.4"],
+      "tasks": [
+        "EvalSeedRunner:按 source+kb 清空重灌 eval/fixtures,幂等测试",
+        "(source, chunk_index) 稳定比对映射(golden 标注机制)",
+        "RetrievalEvaluator:调用 HybridDocumentRetriever 全链路,指标计算(纯 unit 前置)+报告落 eval_run",
+        "产出 eval/reports/baseline.json 并入库 git"
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "./mvnw test -Pintegration 一条命令产出含 snapshot_hash 的检索基线报告",
+      "scopeNotes": "@Tag(integration),直连本地 betterrag_eval 域(PG+ES,D4);指标算法零 LLM 成本可高频跑。",
+      "blockedBy": ["S4"],
+      "techGuidance": "D4:Document id 是随机 UUID,不可作 golden 标注,必须用 (source, chunk_index) 定位"
+    },
+    {
+      "id": "S6",
+      "title": "生成评测器:LLM-as-judge 三维度+归因",
+      "covers": ["spec02 §4.5"],
+      "tasks": [
+        "三维度 judge prompt 从 test/RAGEvaluator 迁移(temperature 0.1,score+reason 落库可审计)",
+        "GenerationEvaluator:调 streamAnswer 收集答案与 sources",
+        "Bad Case 三段归因(检索阶段/生成阶段/知识库)标签化",
+        "@Tag(llm) 手动运行入口与报告输出"
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "手动触发跑通全部 case,三维度分数+reason 落 eval_run,坏案例带归因",
+      "scopeNotes": "真实调 SiliconFlow,花钱且波动,绝不进默认构建。",
+      "blockedBy": ["S3", "S4"],
+      "techGuidance": "D5:检索指标纯规则做门禁,生成指标做参考;JSON 解析容错复用 RAGEvaluator 已验证逻辑"
+    },
+    {
+      "id": "S7",
+      "title": "Markdown 结构感知切分器",
+      "covers": ["spec03 §4.1/4.2"],
+      "tasks": [
+        "MarkdownStructureSplitter 纯函数:ATX 标题分节/headingPath/代码块与表格原子保护/超长节二次切/无标题退化",
+        "KnowledgeIngestionService 按 file_type+strategy 路由(md→structure,其余→token)",
+        "app.rag.chunking.strategy: token|structure 开关(默认 token)",
+        "heading_path metadata 贯通 PG 与 ES"
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "上传含表格与代码块的 md,chunk 不被切断且带 heading_path;strategy 切换互不破坏上传",
+      "scopeNotes": "纯函数 TDD 完美场景;默认值是否转 structure 由 S5 评测决定。",
+      "blockedBy": [],
+      "techGuidance": "D6:TokenTextSplitter 保留为兜底与二次切分器,不删除"
+    },
+    {
+      "id": "S8",
+      "title": "Parent-Child 入库:小粒度嵌入的存储模型",
+      "covers": ["spec03 §4.3(入库侧)"],
+      "tasks": [
+        "rag_parent_chunk 表与 repository",
+        "parent 聚合规则:同 headingPath 相邻 child 聚合,超 1500 token 按序自切",
+        "ingestion 双写:child metadata.parent_id,parent 不进向量库/ES",
+        "app.rag.parent-child.enabled 开关(默认 false)"
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "开关开启上传后,parent 表与 child 元数据关联正确;关闭时零影响",
+      "scopeNotes": "schema 变更受开关保护,评测证明收益前不转正。",
+      "blockedBy": ["S7"],
+      "techGuidance": "D7:parent 生成依赖结构切分的 headingPath,故排在 S7 后"
+    },
+    {
+      "id": "S9",
+      "title": "Parent-Child 检索扩展(small-to-big)",
+      "covers": ["spec03 §4.3(检索侧)"],
+      "tasks": [
+        "ParentExpansionProcessor:按 parent_id 批量 IN 回查",
+        "同 parent 多 child 命中去重(保留最高分)并替换为 parent 文本",
+        "token 预算约束的扩展上限;开关直通路径测试",
+        "sources 聚合展示不受影响的验证"
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "开启后进入 prompt 的是 parent 完整文本,前端来源展示不变",
+      "scopeNotes": "一次批量回查的延迟可由 S1 trace 量化。",
+      "blockedBy": ["S8"]
+    },
+    {
+      "id": "S10",
+      "title": "上下文过滤链:分数落元数据+阈值/去重/预算",
+      "covers": ["spec03 §4.4/4.5"],
+      "tasks": [
+        "RerankDocumentPostProcessor 写 metadata.rerank_score(降级路径 rerank_score=-1+fallback_score)",
+        "ScoreThresholdFilter:低分剔除;全低分保留 top1 并打 low_confidence(驱动兜底话术)",
+        "NearDuplicateFilter:字符 3-gram Jaccard 判重保留高分",
+        "TokenBudgetFilter(jtokkit)+ filter 配置组 + 处理器注册顺序(rerank→扩展→三过滤)"
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "低分/重复/超长上下文被正确处理;low_confidence 能触发兜底;S5 指标不劣于基线",
+      "scopeNotes": "三个过滤器均实现 DocumentPostProcessor,advisor/pipeline 双模式天然兼容。",
+      "blockedBy": ["S3"],
+      "techGuidance": "D8:jtokkit 仅用于预算,允许 ~5% 误差;阈值初值保守,评测调优并记入 snapshot"
+    },
+    {
+      "id": "S11",
+      "title": "意图路由 IntentRouteService",
+      "covers": ["spec04 §4.1"],
+      "tasks": [
+        "prompts/intent-system.st(few-shot)+ BeanOutputConverter 结构化输出 IntentRoute{intent,confidence,reason}",
+        "IntentRouteService:超时 2s/解析失败/confidence<0.6 全量回退 RAG",
+        "app.rag.intent-model 配置(可配廉价模型)",
+        "单测覆盖三分支降级与三类意图样例"
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "知识/闲聊/工具三类样例路由正确;意图服务不可用时全部回落 RAG 功能无损",
+      "scopeNotes": "独立于编排,可先行;参考 test/intent 下学习版实现迁移。",
+      "blockedBy": [],
+      "techGuidance": "D9:路由是增强不是单点,降级铁律与全局哲学一致;intent 模板纳入 config snapshot"
+    },
+    {
+      "id": "S12",
+      "title": "工具 Agent:ReAct 循环与 tool_step 事件",
+      "covers": ["spec04 §4.2"],
+      "tasks": [
+        "ToolAgentService 手写 ReAct 循环:独立 ChatClient(带工具/无 RAG advisor)",
+        "maxSteps 硬上限与超步强制收敛注入;工具异常作为 observation 继续",
+        "SSE tool_step 事件{step,tool,argsDigest,resultDigest}",
+        "fake ChatModel 剧本测试:两步收敛/超步/工具异常三分支"
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "'北京明天天气'经 route:TOOL 分派,前端可见工具步骤条,答案来自工具结果",
+      "scopeNotes": "循环/终止/回填全手写,是面试深挖点也是资产。",
+      "blockedBy": ["S11"],
+      "techGuidance": "D9:复用 NonReturnDirectToolCallback;digest 进 trace 可审计(防注入乱调工具)"
+    },
+    {
+      "id": "S13",
+      "title": "Supervisor 多 Agent 分派与前端适配",
+      "covers": ["spec04 §4.3-4.5"],
+      "tasks": [
+        "Agent 接口(supports/run)+ AgentTask/AgentResult 协议",
+        "RagAgent(现编排)/ToolAgent(S12)/ChatAgent(轻量直答)三实现",
+        "SupervisorService 分派与无命中回退 RagAgent;三 Agent 共享 ChatMemory",
+        "SSE route 事件;前端 route 徽标+工具步骤条渲染;跨轮意图切换测试"
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "同会话连续提问:知识→天气→闲聊,三次分派正确且历史互通",
+      "scopeNotes": "路由拓扑,不做并发编排(诚实边界);旧 SSE 事件只增不改。",
+      "blockedBy": ["S12"],
+      "techGuidance": "D9:ChatAgent 无检索开销,闲聊响应时间显著下降可用 trace 对比佐证"
+    },
+    {
+      "id": "S14",
+      "title": "检索 REST 端点 /api/rag/search",
+      "covers": ["spec05 §4.1"],
+      "tasks": [
+        "POST /api/rag/search:query/kb/topK(1~20)校验,复用检索侧(Rewrite→Hybrid→Rerank),不生成",
+        "SearchHit 结构(source/kb/chunkIndex/score/text 截断 500 字符)",
+        "MockMvc+本地 PG/ES(betterrag_eval)集成测试与异常结构化返回"
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "curl 调 /api/rag/search 返回带 score/source 的片段列表",
+      "scopeNotes": "同时服务 MCP 工具、评测与前端引用预览的复用资产。",
+      "blockedBy": [],
+      "techGuidance": "D11:S3 前可直接调 HybridDocumentRetriever+Rerank,S3 后切 pipeline 检索节点"
+    },
+    {
+      "id": "S15",
+      "title": "RagSearchTool:RAG 能力暴露为 MCP 工具",
+      "covers": ["spec05 §4.2"],
+      "tasks": [
+        "mcp-server 新增 RagSearchTool(@McpTool,风格对齐 WeatherTool)",
+        "RestClient 调 S14 端点,连接/读超时 10s,app.mcp.rag-base-url 可配",
+        "非 2xx/超时 → 结构化 Response{status:error},不抛异常",
+        "MockRestServiceServer 三剧本测试(成功/超时/5xx)"
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "外部 MCP 客户端经 ragSearch 查到知识库内容;bootstrap 停机时返回可读错误",
+      "scopeNotes": "工作量小、叙事价值高(协议两端+业务工具)。",
+      "blockedBy": ["S14"]
+    },
+    {
+      "id": "S16",
+      "title": "生产化打包:JDBC 记忆/健康检查/compose/参数化过滤",
+      "covers": ["spec05 §4.3-4.6"],
+      "tasks": [
+        "ChatMemory 换 spring-ai JDBC starter+PG schema,重启续聊与窗口裁剪测试",
+        "actuator + PgVector/Es HealthIndicator(ES DOWN 不阻塞纯向量问答)",
+        "docker-compose(pgvector/ES+ik 版本锁定/bootstrap/mcp)+ Dockerfile + scripts/smoke.sh",
+        "escapeForFilter 删除,改 FilterExpressionBuilder 参数化(恶意值测试)",
+        "README 更新:架构图/快速开始/SSE 事件表"
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "compose 一键起全栈 smoke 全绿;重启后会话续聊;/actuator/health 反映 PG/ES 状态",
+      "scopeNotes": "杂项收口,建议最后执行;compose 冒烟依赖 Docker Desktop(Windows)。",
+      "blockedBy": [],
+      "techGuidance": "D3/D10/D12:Flyway 仅在首次破坏性 schema 变更时引入;ik 插件版本与 ES 严格绑定用 ENV 锁定"
+    }
+  ]
+}
