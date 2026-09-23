@@ -3,6 +3,7 @@ package com.betterrag.service.rag;
 import com.betterrag.config.RAGProperties;
 import com.betterrag.service.RerankService;
 import com.betterrag.service.RerankService.RerankItem;
+import com.betterrag.service.trace.TraceRecorder;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -26,14 +27,24 @@ public class RerankDocumentPostProcessor implements DocumentPostProcessor {
 
     private final RerankService rerankService;
     private final RAGProperties ragProperties;
+    private final TraceRecorder traceRecorder;
 
-    public RerankDocumentPostProcessor(RerankService rerankService, RAGProperties ragProperties) {
+    public RerankDocumentPostProcessor(RerankService rerankService,
+                                       RAGProperties ragProperties,
+                                       TraceRecorder traceRecorder) {
         this.rerankService = rerankService;
         this.ragProperties = ragProperties;
+        this.traceRecorder = traceRecorder;
     }
 
     @Override
     public @NonNull List<Document> process(@NonNull Query query, @NonNull List<Document> documents) {
+        return traceRecorder.spanAround("rerank", "candidates=" + documents.size(),
+                () -> doProcess(query, documents),
+                docs -> "kept=" + docs.size());
+    }
+
+    private List<Document> doProcess(Query query, List<Document> documents) {
         if (documents.isEmpty()) {
             return List.of();
         }

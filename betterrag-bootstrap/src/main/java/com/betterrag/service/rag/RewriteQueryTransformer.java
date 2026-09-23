@@ -1,5 +1,8 @@
 package com.betterrag.service.rag;
 
+import com.betterrag.service.trace.TraceContext;
+import com.betterrag.service.trace.TraceRecorder;
+
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.NonNull;
 import org.springframework.ai.chat.client.ChatClient;
@@ -26,20 +29,30 @@ public class RewriteQueryTransformer implements QueryTransformer {
     private final Resource rewriteSystemPrompt;
     private final Resource rewriteUserPrompt;
     private final String rewriteModel;
+    private final TraceRecorder traceRecorder;
 
     public RewriteQueryTransformer(ChatModel chatModel,
                                    Resource rewriteSystemPrompt,
                                    Resource rewriteUserPrompt,
-                                   String rewriteModel) {
+                                   String rewriteModel,
+                                   TraceRecorder traceRecorder) {
         this.chatClient = ChatClient.builder(chatModel).build();
         this.rewriteSystemPrompt = rewriteSystemPrompt;
         this.rewriteUserPrompt = rewriteUserPrompt;
         this.rewriteModel = rewriteModel;
+        this.traceRecorder = traceRecorder;
     }
 
     @Override
     public @NonNull Query transform(Query query) {
-        String rewritten = rewrite(query.text());
+        String question = query.text();
+        String rewritten = traceRecorder.spanAround("rewrite", question,
+                () -> rewrite(question),
+                rewrittenText -> rewrittenText);
+        TraceContext ctx = traceRecorder.current();
+        if (ctx != null) {
+            ctx.setRewrittenQuery(rewritten);
+        }
         return query.mutate().text(rewritten).build();
     }
 

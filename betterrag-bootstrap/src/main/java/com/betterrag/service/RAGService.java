@@ -4,6 +4,8 @@ import cn.hutool.core.collection.CollUtil;
 import com.betterrag.config.RAGProperties;
 import com.betterrag.model.RAGRequest;
 import com.betterrag.service.rag.ChatResponseUtils;
+import com.betterrag.service.trace.TraceContext;
+import com.betterrag.service.trace.TraceRecorder;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -45,6 +47,7 @@ public class RAGService {
     private final Resource titleUserPrompt;
     private final TaskExecutor taskExecutor;
     private final SuggestionService suggestionService;
+    private final TraceRecorder traceRecorder;
 
     public RAGService(ChatClient chatClient,
                       ChatModel chatModel,
@@ -52,7 +55,8 @@ public class RAGService {
                       @Value("classpath:/prompts/title-system.st") Resource titleSystemPrompt,
                       @Value("classpath:/prompts/title-user.st") Resource titleUserPrompt,
                       @Qualifier("ragTaskExecutor") TaskExecutor taskExecutor,
-                      SuggestionService suggestionService) {
+                      SuggestionService suggestionService,
+                      TraceRecorder traceRecorder) {
         this.chatClient = chatClient;
         this.titleClient = ChatClient.builder(chatModel).build();
         this.ragProperties = ragProperties;
@@ -60,6 +64,7 @@ public class RAGService {
         this.titleUserPrompt = titleUserPrompt;
         this.taskExecutor = taskExecutor;
         this.suggestionService = suggestionService;
+        this.traceRecorder = traceRecorder;
     }
 
     public SseEmitter streamChat(RAGRequest request) {
@@ -130,6 +135,8 @@ public class RAGService {
     public List<Document> streamAnswer(String question, String kb, String sessionId,
                                        Consumer<String> tokenConsumer) {
         List<Document> sources = new ArrayList<>();
+        StringBuilder answerBuffer = new StringBuilder();
+        TraceContext traceCtx = traceRecorder.start(sessionId, question);
         try {
             long startTime = System.currentTimeMillis();
             log.info("[RAG] 原始问题: {}", question);
@@ -152,25 +159,16 @@ public class RAGService {
             log.info("[RAG] 开始流式调用 LLM...");
             long llmStartTime = System.currentTimeMillis();
 
-            requestSpec.stream().chatClientResponse().toStream().forEach(chunk -> {
-                if (CollUtil.isEmpty(sources)) {
-                    @SuppressWarnings("unchecked")
-                    List<Document> docs = (List<Document>) chunk.context()
-                            .get(RetrievalAugmentationAdvisor.DOCUMENT_CONTEXT);
-                    if (CollUtil.isNotEmpty(docs)) {
-                        sources.addAll(docs);
-                    }
-                }
-                String token = ChatResponseUtils.extractText(chunk);
-                if (StringUtils.hasText(token)) {
-                    tokenConsumer.accept(token);
-                }
-            });
+            traceRecorder.spanAround(traceCtx, "generate",
+                    () -> consumeStream(requestSpec, tokenConsumer, answerBuffer, sources),
+                    ignored -> "chars=" + answerBuffer.length());
 
             log.info("[RAG] LLM 流式调用完成 ({}ms, 总 {}ms)",
                     System.currentTimeMillis() - llmStartTime,
                     System.currentTimeMillis() - startTime);
+            traceRecorder.finish(traceCtx, answerBuffer.toString());
         } catch (RuntimeException e) {
+            traceRecorder.finishWithError(traceCtx, e.getMessage());
             if (e.getCause() instanceof IOException) {
                 throw e;
             }
@@ -178,6 +176,28 @@ public class RAGService {
             tokenConsumer.accept("处理问题时出错：" + e.getMessage());
         }
 
+        return sources;
+    }
+
+    private List<Document> consumeStream(ChatClient.ChatClientRequestSpec requestSpec,
+                                        Consumer<String> tokenConsumer,
+                                        StringBuilder answerBuffer,
+                                        List<Document> sources) {
+        requestSpec.stream().chatClientResponse().toStream().forEach(chunk -> {
+            if (CollUtil.isEmpty(sources)) {
+                @SuppressWarnings("unchecked")
+                List<Document> docs = (List<Document>) chunk.context()
+                        .get(RetrievalAugmentationAdvisor.DOCUMENT_CONTEXT);
+                if (CollUtil.isNotEmpty(docs)) {
+                    sources.addAll(docs);
+                }
+            }
+            String token = ChatResponseUtils.extractText(chunk);
+            if (StringUtils.hasText(token)) {
+                answerBuffer.append(token);
+                tokenConsumer.accept(token);
+            }
+        });
         return sources;
     }
 

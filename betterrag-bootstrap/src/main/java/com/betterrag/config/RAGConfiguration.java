@@ -5,6 +5,7 @@ import com.betterrag.service.rag.HybridDocumentRetriever;
 import com.betterrag.service.rag.KeywordDocumentRetriever;
 import com.betterrag.service.rag.RewriteQueryTransformer;
 import com.betterrag.service.rag.NonReturnDirectToolCallback;
+import com.betterrag.service.trace.TraceRecorder;
 
 import io.modelcontextprotocol.client.McpSyncClient;
 import org.apache.tika.Tika;
@@ -68,12 +69,13 @@ public class RAGConfiguration {
     public HybridDocumentRetriever hybridDocumentRetriever(
             VectorStore vectorStore,
             KeywordDocumentRetriever keywordDocumentRetriever,
-            RAGProperties ragProperties) {
+            RAGProperties ragProperties,
+            TraceRecorder traceRecorder) {
         VectorStoreDocumentRetriever vectorRetriever = VectorStoreDocumentRetriever.builder()
                 .vectorStore(vectorStore)
                 .topK(ragProperties.getRetrieveTopK())
                 .build();
-        return new HybridDocumentRetriever(vectorRetriever, keywordDocumentRetriever, ragProperties);
+        return new HybridDocumentRetriever(vectorRetriever, keywordDocumentRetriever, ragProperties, traceRecorder);
     }
 
     @Bean
@@ -129,13 +131,15 @@ public class RAGConfiguration {
     public RewriteQueryTransformer rewriteQueryTransformer(
             ChatModel chatModel,
             RAGProperties ragProperties,
+            TraceRecorder traceRecorder,
             @Value("classpath:/prompts/rewrite-system.st") Resource rewriteSystemPrompt,
             @Value("classpath:/prompts/rewrite-user.st") Resource rewriteUserPrompt) {
         return new RewriteQueryTransformer(
                 chatModel,
                 rewriteSystemPrompt,
                 rewriteUserPrompt,
-                ragProperties.getRewriteModel());
+                ragProperties.getRewriteModel(),
+                traceRecorder);
     }
 
     @Bean

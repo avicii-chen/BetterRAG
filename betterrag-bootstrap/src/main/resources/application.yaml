@@ -5,6 +5,11 @@ spring:
   application:
     name: betterrag
 
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema-trace.sql
+
   servlet:
     multipart:
       max-file-size: 20MB
@@ -63,3 +68,5 @@ app:
     rrf-k: 60
     es-analyzer: ${ES_ANALYZER:ik_smart}
     es-url: ${ELASTICSEARCH_URL:http://localhost:9200}
+    trace:
+      enabled: ${RAG_TRACE_ENABLED:true}

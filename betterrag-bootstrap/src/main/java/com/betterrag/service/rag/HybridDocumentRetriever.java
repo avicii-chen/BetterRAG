@@ -1,6 +1,7 @@
 package com.betterrag.service.rag;
 
 import com.betterrag.config.RAGProperties;
+import com.betterrag.service.trace.TraceRecorder;
 
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -26,9 +27,16 @@ public class HybridDocumentRetriever implements DocumentRetriever {
     private final VectorStoreDocumentRetriever vectorRetriever;
     private final KeywordDocumentRetriever keywordRetriever;
     private final RAGProperties ragProperties;
+    private final TraceRecorder traceRecorder;
 
     @Override
     public @NonNull List<Document> retrieve(@NonNull Query query) {
+        return traceRecorder.spanAround("hybrid-retrieve", query.text(),
+                () -> doRetrieve(query),
+                docs -> "docs=" + docs.size());
+    }
+
+    private List<Document> doRetrieve(Query query) {
         CompletableFuture<List<Document>> vectorFuture = CompletableFuture.supplyAsync(() -> vectorRetriever.retrieve(query));
         CompletableFuture<List<Document>> keywordFuture = CompletableFuture.supplyAsync(() -> keywordRetriever.retrieve(query));
 

@@ -67,4 +67,17 @@ public class RAGProperties {
     private String esAnalyzer = "standard";
 
     private String esUrl = "http://localhost:9200";
+
+    private final Trace trace = new Trace();
+
+    /**
+     * 链路追踪配置(spec 01):app.rag.trace.*
+     */
+    @Getter
+    @Setter
+    public static class Trace {
+
+        /** 是否开启 trace 落库;关闭后 TraceRecorder 直通,零 SQL */
+        private boolean enabled = true;
+    }
 }
