@@ -35,10 +35,18 @@ public class TraceRecorder {
      * 开启一次问答 trace 并绑定当前线程;开关关闭时返回 NOOP 上下文。
      */
     public TraceContext start(String sessionId, String question) {
+        return start(sessionId, question, System.currentTimeMillis());
+    }
+
+    /**
+     * 指定起始时间的重载(S3 pipeline 桥接):DAG 先执行、后建 trace 并回放节点记录,
+     * totalMs 仍以问答起点计。
+     */
+    public TraceContext start(String sessionId, String question, long startedAtMillis) {
         if (!enabled) {
             return TraceContext.NOOP;
         }
-        TraceContext ctx = new TraceContext(UUID.randomUUID(), sessionId, question);
+        TraceContext ctx = new TraceContext(UUID.randomUUID(), sessionId, question, startedAtMillis);
         CURRENT.set(ctx);
         return ctx;
     }

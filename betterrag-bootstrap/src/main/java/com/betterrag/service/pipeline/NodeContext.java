@@ -27,7 +27,10 @@ public final class NodeContext {
         return lastOutput;
     }
 
-    void setLastOutput(Object output) {
+    /**
+     * 由 DagPipeline 主线程串行维护;测试与桥接场景可显式设置。
+     */
+    public void setLastOutput(Object output) {
         this.lastOutput = output;
     }
 }

@@ -20,7 +20,7 @@ public class TraceContext {
     private final UUID traceId;
     private final String sessionId;
     private final String question;
-    private final long startedAt = System.currentTimeMillis();
+    private final long startedAt;
     private final List<NodeSpan> spans = new CopyOnWriteArrayList<>();
     private volatile String rewrittenQuery;
 
@@ -29,21 +29,30 @@ public class TraceContext {
         this.traceId = null;
         this.sessionId = null;
         this.question = null;
+        this.startedAt = 0L;
     }
 
     TraceContext(UUID traceId, String sessionId, String question) {
+        this(traceId, sessionId, question, System.currentTimeMillis());
+    }
+
+    TraceContext(UUID traceId, String sessionId, String question, long startedAt) {
         this.noop = false;
         this.traceId = traceId;
         this.sessionId = sessionId;
         this.question = question;
+        this.startedAt = startedAt;
     }
 
     boolean isNoop() {
         return noop;
     }
 
-    void addSpan(String node, String status, long costMs,
-                 String inputDigest, String outputDigest, String error) {
+    /**
+     * 记录一个节点 span。public 供 S3 pipeline 桥接回放 DAG NodeTrace 使用。
+     */
+    public void addSpan(String node, String status, long costMs,
+                        String inputDigest, String outputDigest, String error) {
         if (noop) {
             return;
         }

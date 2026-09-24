@@ -68,5 +68,6 @@ app:
     rrf-k: 60
     es-analyzer: ${ES_ANALYZER:ik_smart}
     es-url: ${ELASTICSEARCH_URL:http://localhost:9200}
+    orchestration: ${RAG_ORCHESTRATION:advisor}
     trace:
       enabled: ${RAG_TRACE_ENABLED:true}

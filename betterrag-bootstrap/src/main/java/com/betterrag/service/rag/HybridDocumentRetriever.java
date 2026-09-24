@@ -3,11 +3,7 @@ package com.betterrag.service.rag;
 import com.betterrag.config.RAGProperties;
 import com.betterrag.service.trace.TraceRecorder;
 
-import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -79,31 +75,7 @@ public class HybridDocumentRetriever implements DocumentRetriever {
     }
 
     private List<Document> rrfFusion(List<Document> vectorDocs, List<Document> keywordDocs) {
-        int k = ragProperties.getRrfK();
-        int topK = ragProperties.getRetrieveTopK();
-
-        Map<String, Double> scoreMap = new HashMap<>();
-        Map<String, Document> docMap = new LinkedHashMap<>();
-
-        accumulateScores(vectorDocs, k, scoreMap, docMap);
-        accumulateScores(keywordDocs, k, scoreMap, docMap);
-
-        return scoreMap.entrySet().stream()
-                .sorted(Map.Entry.<String, Double>comparingByValue().reversed())
-                .limit(topK)
-                .map(entry -> docMap.get(entry.getKey()))
-                .filter(Objects::nonNull)
-                .toList();
-    }
-
-    private void accumulateScores(List<Document> docs, int k,
-                                  Map<String, Double> scoreMap,
-                                  Map<String, Document> docMap) {
-        for (int i = 0; i < docs.size(); i++) {
-            Document doc = docs.get(i);
-            String docId = doc.getId();
-            scoreMap.merge(docId, 1.0 / (k + i + 1), Double::sum);
-            docMap.putIfAbsent(docId, doc);
-        }
+        return RrfFusion.fuse(vectorDocs, keywordDocs,
+                ragProperties.getRrfK(), ragProperties.getRetrieveTopK());
     }
 }

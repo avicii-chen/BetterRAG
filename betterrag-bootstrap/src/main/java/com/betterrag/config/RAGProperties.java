@@ -68,6 +68,11 @@ public class RAGProperties {
 
     private String esUrl = "http://localhost:9200";
 
+    /**
+     * 检索编排模式(D1 双模开关):advisor(默认,零行为变更)| pipeline(DAG 显式编排)。
+     */
+    private String orchestration = "advisor";
+
     private final Trace trace = new Trace();
 
     /**

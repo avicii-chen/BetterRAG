@@ -4,6 +4,12 @@ import cn.hutool.core.collection.CollUtil;
 import com.betterrag.config.RAGProperties;
 import com.betterrag.model.RAGRequest;
 import com.betterrag.service.rag.ChatResponseUtils;
+import com.betterrag.service.pipeline.DagPipeline;
+import com.betterrag.service.pipeline.NodeContext;
+import com.betterrag.service.pipeline.NodeTrace;
+import com.betterrag.service.pipeline.PipelineResult;
+import com.betterrag.service.rag.node.GenerateNode;
+import com.betterrag.service.rag.node.RewriteNode;
 import com.betterrag.service.trace.TraceContext;
 import com.betterrag.service.trace.TraceRecorder;
 
@@ -48,15 +54,17 @@ public class RAGService {
     private final TaskExecutor taskExecutor;
     private final SuggestionService suggestionService;
     private final TraceRecorder traceRecorder;
+    private final DagPipeline ragPipeline;
 
-    public RAGService(ChatClient chatClient,
+    public RAGService(@Qualifier("chatClient") ChatClient chatClient,
                       ChatModel chatModel,
                       RAGProperties ragProperties,
                       @Value("classpath:/prompts/title-system.st") Resource titleSystemPrompt,
                       @Value("classpath:/prompts/title-user.st") Resource titleUserPrompt,
                       @Qualifier("ragTaskExecutor") TaskExecutor taskExecutor,
                       SuggestionService suggestionService,
-                      TraceRecorder traceRecorder) {
+                      TraceRecorder traceRecorder,
+                      DagPipeline ragPipeline) {
         this.chatClient = chatClient;
         this.titleClient = ChatClient.builder(chatModel).build();
         this.ragProperties = ragProperties;
@@ -65,6 +73,7 @@ public class RAGService {
         this.taskExecutor = taskExecutor;
         this.suggestionService = suggestionService;
         this.traceRecorder = traceRecorder;
+        this.ragPipeline = ragPipeline;
     }
 
     public SseEmitter streamChat(RAGRequest request) {
@@ -134,6 +143,55 @@ public class RAGService {
 
     public List<Document> streamAnswer(String question, String kb, String sessionId,
                                        Consumer<String> tokenConsumer) {
+        if ("pipeline".equalsIgnoreCase(ragProperties.getOrchestration())) {
+            return streamAnswerViaPipeline(question, kb, sessionId, tokenConsumer);
+        }
+        return streamAnswerViaAdvisor(question, kb, sessionId, tokenConsumer);
+    }
+
+    /**
+     * S3:pipeline 模式——DAG 先执行(组件内 ThreadLocal 无 trace,直通零重复),
+     * 而后创建 trace 回放全部 NodeTrace(含 vector/keyword 分支粒度)再落库。
+     */
+    private List<Document> streamAnswerViaPipeline(String question, String kb, String sessionId,
+                                                   Consumer<String> tokenConsumer) {
+        long startedAt = System.currentTimeMillis();
+        NodeContext nodeContext = new NodeContext();
+        nodeContext.put(RewriteNode.QUESTION_KEY, question);
+        nodeContext.put(RewriteNode.SESSION_ID_KEY, sessionId);
+        nodeContext.put(RewriteNode.TOKEN_CONSUMER_KEY, tokenConsumer);
+        if (StringUtils.hasText(kb)) {
+            nodeContext.put(RewriteNode.KB_KEY, kb);
+        }
+
+        TraceContext traceCtx = traceRecorder.start(sessionId, question, startedAt);
+        try {
+            PipelineResult result = ragPipeline.run(nodeContext);
+            for (NodeTrace nodeTrace : result.traces()) {
+                traceCtx.addSpan(nodeTrace.node(), nodeTrace.status().name(),
+                        nodeTrace.costMs(), nodeTrace.inputDigest(),
+                        nodeTrace.outputDigest(), nodeTrace.error());
+            }
+            if (!result.success()) {
+                throw new IllegalStateException("pipeline 执行失败: " + result.error());
+            }
+            traceRecorder.finish(traceCtx, String.valueOf(result.output()));
+
+            List<Document> sources = nodeContext.get(GenerateNode.SOURCES_KEY);
+            return sources == null ? new ArrayList<>() : sources;
+        } catch (RuntimeException e) {
+            traceRecorder.finishWithError(traceCtx, e.getMessage());
+            if (e.getCause() instanceof IOException) {
+                throw e;
+            }
+            log.error("[RAG][pipeline] 问答过程出错", e);
+            tokenConsumer.accept("处理问题时出错：" + e.getMessage());
+            return new ArrayList<>();
+        }
+    }
+
+    private List<Document> streamAnswerViaAdvisor(String question, String kb, String sessionId,
+                                                  Consumer<String> tokenConsumer) {
         List<Document> sources = new ArrayList<>();
         StringBuilder answerBuffer = new StringBuilder();
         TraceContext traceCtx = traceRecorder.start(sessionId, question);

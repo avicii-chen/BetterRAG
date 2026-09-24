@@ -3,8 +3,18 @@ package com.betterrag.config;
 import com.betterrag.service.rag.ElasticsearchDocumentRepository;
 import com.betterrag.service.rag.HybridDocumentRetriever;
 import com.betterrag.service.rag.KeywordDocumentRetriever;
+import com.betterrag.service.rag.RerankDocumentPostProcessor;
 import com.betterrag.service.rag.RewriteQueryTransformer;
 import com.betterrag.service.rag.NonReturnDirectToolCallback;
+import com.betterrag.service.rag.ContextInjectAdvisor;
+import com.betterrag.service.rag.node.GenerateNode;
+import com.betterrag.service.rag.node.KeywordBranchNode;
+import com.betterrag.service.rag.node.RerankNode;
+import com.betterrag.service.rag.node.RewriteNode;
+import com.betterrag.service.rag.node.RrfFuseNode;
+import com.betterrag.service.rag.node.VectorBranchNode;
+import com.betterrag.service.pipeline.DagPipeline;
+import com.betterrag.service.pipeline.ParallelNode;
 import com.betterrag.service.trace.TraceRecorder;
 
 import io.modelcontextprotocol.client.McpSyncClient;
@@ -17,6 +27,7 @@ import org.springframework.ai.chat.memory.MessageWindowChatMemory;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.mcp.SyncMcpToolCallbackProvider;
 import org.springframework.ai.tool.ToolCallback;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.ai.chat.prompt.PromptTemplate;
 import org.springframework.ai.rag.advisor.RetrievalAugmentationAdvisor;
 import org.springframework.ai.rag.generation.augmentation.ContextualQueryAugmenter;
@@ -140,6 +151,63 @@ public class RAGConfiguration {
                 rewriteUserPrompt,
                 ragProperties.getRewriteModel(),
                 traceRecorder);
+    }
+
+    /**
+     * S3:pipeline 模式的上下文注入 advisor(memory 之后执行,历史只存原始问题)。
+     */
+    @Bean
+    public ContextInjectAdvisor contextInjectAdvisor(
+            @Value("classpath:/prompts/answer-user.st") Resource ragAugmentPrompt) {
+        ContextualQueryAugmenter augmenter = ContextualQueryAugmenter.builder()
+                .promptTemplate(new PromptTemplate(ragAugmentPrompt))
+                .allowEmptyContext(true)
+                .build();
+        return new ContextInjectAdvisor(augmenter);
+    }
+
+    /**
+     * S3:pipeline 模式专用 ChatClient——memory + ContextInjectAdvisor,
+     * 无 RetrievalAugmentationAdvisor(检索已由 DAG 完成)。
+     */
+    @Bean
+    public ChatClient pipelineChatClient(ChatModel chatModel,
+                                         ToolCallback[] toolCallbacks,
+                                         ChatMemory chatMemory,
+                                         ContextInjectAdvisor contextInjectAdvisor,
+                                         @Value("classpath:/prompts/answer-system.st") Resource answerSystemPrompt) {
+        MessageChatMemoryAdvisor memoryAdvisor = MessageChatMemoryAdvisor.builder(chatMemory).build();
+        return ChatClient.builder(chatModel)
+                .defaultSystem(answerSystemPrompt)
+                .defaultToolCallbacks(toolCallbacks)
+                .defaultAdvisors(memoryAdvisor, contextInjectAdvisor)
+                .build();
+    }
+
+    /**
+     * S3:DAG 流水线。rewrite → hybrid-retrieve(vector ∥ keyword) → fuse → rerank → generate;
+     * keyword 分支 SKIP_AND_CONTINUE,与 advisor 模式降级语义一致。
+     */
+    @Bean
+    public DagPipeline ragPipeline(RewriteQueryTransformer rewriteQueryTransformer,
+                                   VectorStore vectorStore,
+                                   KeywordDocumentRetriever keywordDocumentRetriever,
+                                   RerankDocumentPostProcessor rerankDocumentPostProcessor,
+                                   @Qualifier("pipelineChatClient") ChatClient pipelineChatClient,
+                                   RAGProperties ragProperties) {
+        VectorStoreDocumentRetriever vectorRetriever = VectorStoreDocumentRetriever.builder()
+                .vectorStore(vectorStore)
+                .topK(ragProperties.getRetrieveTopK())
+                .build();
+        ParallelNode retrieveParallel = new ParallelNode("hybrid-retrieve", List.of(
+                new VectorBranchNode(vectorRetriever),
+                new KeywordBranchNode(keywordDocumentRetriever)));
+        return new DagPipeline()
+                .add(new RewriteNode(rewriteQueryTransformer))
+                .add(retrieveParallel)
+                .add(new RrfFuseNode(ragProperties))
+                .add(new RerankNode(rerankDocumentPostProcessor))
+                .add(new GenerateNode(pipelineChatClient, ragProperties));
     }
 
     @Bean
